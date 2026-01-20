@@ -35,8 +35,16 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
     logging.info(
         f"Global settings: \nSLEEPTIME: {SLEEPTIME}\nENDTIME: {ENDTIME}\nENABLE_SLIDER: {ENABLE_SLIDER}\nRESERVE_NEXT_DAY: {RESERVE_NEXT_DAY}"
     )
-    if action and len(usernames.split(",")) != len(users):
-        raise Exception("user number should match the number of config")
+
+    usernames_list, passwords_list = None, None
+    if action:
+        if not usernames or not passwords:
+            raise Exception("USERNAMES or PASSWORDS not configured correctly in env")
+        usernames_list = usernames.split(",")
+        passwords_list = passwords.split(",")
+        if len(usernames_list) != len(passwords_list):
+            raise Exception("USERNAMES and PASSWORDS count mismatch")
+
     if success_list is None:
         success_list = [False] * len(users)
     current_dayofweek = get_current_dayofweek(action)
@@ -47,14 +55,26 @@ def login_and_reserve(users, usernames, passwords, action, success_list=None):
         roomid = user["roomid"]
         seatid = user["seatid"]
         daysofweek = user["daysofweek"]
-        if action:
-            username, password = (
-                usernames.split(",")[index],
-                passwords.split(",")[index],
-            )
+
+        # 如果今天不在该配置的 daysofweek 中，直接跳过
         if current_dayofweek not in daysofweek:
             logging.info("Today not set to reserve")
             continue
+
+        if action:
+            if len(usernames_list) == 1:
+                # 只有一个账号，所有配置都用这个账号
+                username = usernames_list[0]
+                password = passwords_list[0]
+            elif index < len(usernames_list):
+                username = usernames_list[index]
+                password = passwords_list[index]
+            else:
+                logging.error(
+                    "Index out of range for USERNAMES/PASSWORDS, skipping this config."
+                )
+                continue
+
         if not success_list[index]:
             logging.info(
                 f"----------- {username} -- {times} -- {seatid} try -----------"
@@ -108,8 +128,19 @@ def debug(users, action=False):
     )
     suc = False
     logging.info(f" Debug Mode start! , action {'on' if action else 'off'}")
+
+    usernames_list, passwords_list = None, None
     if action:
         usernames, passwords = get_user_credentials(action)
+        if not usernames or not passwords:
+            logging.error("USERNAMES or PASSWORDS not configured correctly in env.")
+            return
+        usernames_list = usernames.split(",")
+        passwords_list = passwords.split(",")
+        if len(usernames_list) != len(passwords_list):
+            logging.error("USERNAMES and PASSWORDS count mismatch.")
+            return
+
     current_dayofweek = get_current_dayofweek(action)
     for index, user in enumerate(users):
         username = user["username"]
@@ -120,14 +151,27 @@ def debug(users, action=False):
         daysofweek = user["daysofweek"]
         if type(seatid) == str:
             seatid = [seatid]
-        if action:
-            username, password = (
-                usernames.split(",")[index],
-                passwords.split(",")[index],
-            )
+
+        # 如果今天不在该配置的 daysofweek 中，直接跳过，不处理账号
         if current_dayofweek not in daysofweek:
             logging.info("Today not set to reserve")
             continue
+
+        # 在 GitHub Actions 中，从环境变量获取账号密码
+        if action:
+            if len(usernames_list) == 1:
+                # 只有一个账号时，所有配置都用这个账号
+                username = usernames_list[0]
+                password = passwords_list[0]
+            elif index < len(usernames_list):
+                username = usernames_list[index]
+                password = passwords_list[index]
+            else:
+                logging.error(
+                    "Index out of range for USERNAMES/PASSWORDS, skipping this config."
+                )
+                continue
+
         logging.info(f"----------- {username} -- {times} -- {seatid} try -----------")
         s = reserve(
             sleep_time=SLEEPTIME,
