@@ -280,14 +280,11 @@ class reserve:
     def get_submit(
         self, url, times, token, roomid, seatid, captcha="", action=False, value=""
     ):
+        # 统一以北京时间（UTC+8）的"今天"为基准，不再区分本地 / GitHub Actions，
+        # 是否预约明天仅由 self.reserve_next_day 决定。
+        beijing_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
         delta_day = 1 if self.reserve_next_day else 0
-        day = datetime.date.today() + datetime.timedelta(
-            days=0 + delta_day
-        )  # 预约今天，修改days=1表示预约明天
-        if action:
-            day = datetime.date.today() + datetime.timedelta(
-                days=1 + delta_day
-            )  # 由于action时区问题导致其早+8区一天
+        day = beijing_today + datetime.timedelta(days=delta_day)
         parm = {
             "roomId": roomid,
             "startTime": times[0],
