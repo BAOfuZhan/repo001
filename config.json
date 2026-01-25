@@ -1,4 +1,5 @@
 {
+    "relogin_every_loop": false,
     "reserve": [
         {
             "username": "",
