@@ -1,6 +1,6 @@
 on:
-  schedule:
-    - cron: "58 23 * * *"  # 每 5 分钟触发一次（UTC）
+  repository_dispatch：
+    type：[cron]
   workflow_dispatch:        # 允许手动开/关
 
 jobs:
