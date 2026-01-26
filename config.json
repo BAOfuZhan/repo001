@@ -32,6 +32,6 @@
         "login_lead_seconds": 20,
 
         "_comment_slider_lead_seconds": "在目标时间前多少秒开始执行滑块验证，默认 10。",
-        "slider_lead_seconds": 14
+        "slider_lead_seconds": 10
     }
 }
