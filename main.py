@@ -54,12 +54,12 @@ get_hms = lambda action: _now(action).strftime("%H:%M:%S")
 get_current_dayofweek = lambda action: _now(action).strftime("%A")
 
 
-SLEEPTIME = 0.1  # 每次抢座的间隔
-ENDTIME = "08:01:00"  # 根据学校的预约座位时间+1min即可
+SLEEPTIME = 0.05  # 每次抢座的间隔（减少到0.05秒以加快速度）
+ENDTIME = "14:59:00"  # 根据学校的预约座位时间+1min即可
 
-ENABLE_SLIDER = True  # 是否有滑块验证（调试阶段先关闭）
-MAX_ATTEMPT = 205  # 最大尝试次数
-RESERVE_NEXT_DAY = False  # 预约明天而不是今天的
+ENABLE_SLIDER = False  # 是否有滑块验证（调试阶段先关闭）
+MAX_ATTEMPT = 30  # 最大尝试次数（减少到30次，确保3个配置都能尝试）
+RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
 
 
 # 是否在每一轮主循环中都重新登录。
@@ -147,6 +147,8 @@ def strategic_first_attempt(
         times = user["times"]
         roomid = user["roomid"]
         seatid = user["seatid"]
+        seat_page_id = user.get("seatPageId")
+        fid_enc = user.get("fidEnc")
         daysofweek = user["daysofweek"]
 
         # 今天不预约该配置，跳过
@@ -175,7 +177,7 @@ def strategic_first_attempt(
             continue
 
         logging.info(
-            f"[strategic] Start first attempt for {username} -- {times} -- {seat_list}"
+            f"[strategic] Start first attempt for {username} -- {times} -- {seat_list} -- seatPageId={seat_page_id} -- fidEnc={fid_enc}"
         )
 
         # 1. 在 [T-30s, T] 区间内完成登录和基础 session（不提前获取页面 token）
@@ -235,7 +237,13 @@ def strategic_first_attempt(
             f"[strategic] Fetch page token for first submit at {token_fetch_dt1} (target_dt + {FIRST_SUBMIT_OFFSET_MS}ms)"
         )
         token1, value1 = s._get_page_token(
-            s.url.format(roomid, first_seat), require_value=True
+            s.url.format(
+                roomId=roomid,
+                day=str(_beijing_now().date()),
+                seatPageId=seat_page_id or "",
+                fidEnc=fid_enc or "",
+            ),
+            require_value=True,
         )
         if not token1:
             logging.error("[strategic] Failed to get page token for first submit, skip this config")
@@ -262,7 +270,13 @@ def strategic_first_attempt(
 
             # 先重新获取一次页面 token
             token2, value2 = s._get_page_token(
-                s.url.format(roomid, first_seat), require_value=True
+                s.url.format(
+                    roomId=roomid,
+                    day=str(_beijing_now().date()),
+                    seatPageId=seat_page_id or "",
+                    fidEnc=fid_enc or "",
+                ),
+                require_value=True,
             )
             if not token2:
                 logging.error("[strategic] Failed to get page token for second submit, skip to third/normal flow")
@@ -290,7 +304,13 @@ def strategic_first_attempt(
             logging.info("[strategic] Second submit failed, prepare third submit with NEW page token")
 
             token3, value3 = s._get_page_token(
-                s.url.format(roomid, first_seat), require_value=True
+                s.url.format(
+                    roomId=roomid,
+                    day=str(_beijing_now().date()),
+                    seatPageId=seat_page_id or "",
+                    fidEnc=fid_enc or "",
+                ),
+                require_value=True,
             )
             if not token3:
                 logging.error("[strategic] Failed to get page token for third submit, give up strategic submits for this config")
@@ -349,6 +369,8 @@ def login_and_reserve(
         times = user["times"]
         roomid = user["roomid"]
         seatid = user["seatid"]
+        seat_page_id = user.get("seatPageId")
+        fid_enc = user.get("fidEnc")
         daysofweek = user["daysofweek"]
 
         # 如果今天不在该配置的 daysofweek 中，直接跳过
@@ -407,7 +429,15 @@ def login_and_reserve(
                 s.requests.headers.update({"Host": "office.chaoxing.com"})
 
             # 在 GitHub Actions 中传入 ENDTIME，确保内部循环在超过结束时间后及时停止
-            suc = s.submit(times, roomid, seatid, action, ENDTIME if action else None)
+            suc = s.submit(
+                times,
+                roomid,
+                seatid,
+                action,
+                ENDTIME if action else None,
+                fidEnc=fid_enc,
+                seat_page_id=seat_page_id,
+            )
             success_list[index] = suc
     return success_list
 
@@ -495,6 +525,8 @@ def debug(users, action=False):
         times = user["times"]
         roomid = user["roomid"]
         seatid = user["seatid"]
+        seat_page_id = user.get("seatPageId")
+        fid_enc = user.get("fidEnc")
         daysofweek = user["daysofweek"]
         if type(seatid) == str:
             seatid = [seatid]
@@ -529,7 +561,7 @@ def debug(users, action=False):
         s.get_login_status()
         s.login(username, password)
         s.requests.headers.update({"Host": "office.chaoxing.com"})
-        suc = s.submit(times, roomid, seatid, action)
+        suc = s.submit(times, roomid, seatid, action, None, fidEnc=fid_enc, seat_page_id=seat_page_id)
         if suc:
             return
 
