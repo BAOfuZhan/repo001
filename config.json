@@ -9,7 +9,7 @@
             "seatid": ["513"],
             "seatPageId": "13472",
             "fidEnc": "4a18e12602b24c8c",
-            "daysofweek": ["Monday","Tuesday"]
+            "daysofweek": ["Monday","Sunday"]
         },
         {
             "username": "",
@@ -19,7 +19,7 @@
             "seatid": ["513"],
             "seatPageId": "13472",
             "fidEnc": "4a18e12602b24c8c",
-            "daysofweek": ["Wednesday"]
+            "daysofweek": ["Tuesday"]
         },
         {
             "username": "",
@@ -29,7 +29,7 @@
             "seatid": ["513"],
             "seatPageId": "13472",
             "fidEnc": "4a18e12602b24c8c",
-            "daysofweek": ["Thursday", "Friday", "Saturday", "Sunday"]
+            "daysofweek": ["Wednesday","Thursday", "Friday", "Saturday", ]
         }
     ],
 
