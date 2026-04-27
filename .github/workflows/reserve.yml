@@ -1,0 +1,316 @@
+run-name: >-
+  Reserve -
+  ${{ github.event.client_payload.trigger_date || github.event.client_payload.school_id || github.event.client_payload.remark || github.event.client_payload.username || 'manual' }}
+
+on:
+  repository_dispatch:
+    types: [reserve]
+  workflow_dispatch:        # 允许手动开/关
+    inputs:
+      test_feishu_only:
+        description: "仅测试飞书通知（true=只发测试消息，不跑抢座）"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  prepare-dispatch:
+    if: ${{ github.event_name == 'repository_dispatch' }}
+    runs-on: ubuntu-latest
+    outputs:
+      users_matrix: ${{ steps.build.outputs.users_matrix }}
+      dispatch_target: ${{ steps.meta.outputs.dispatch_target }}
+
+    steps:
+      - name: Build dispatch metadata
+        id: meta
+        run: |
+          target="$(jq -r '.client_payload.dispatch_target // "github"' "$GITHUB_EVENT_PATH")"
+          echo "dispatch_target=${target}" >> "$GITHUB_OUTPUT"
+
+      - name: Build user matrix from payload
+        id: build
+        run: |
+          users=$(jq -c '.client_payload.users // [ .client_payload ]' "$GITHUB_EVENT_PATH")
+          echo "users_matrix=$users" >> "$GITHUB_OUTPUT"
+
+  reserve-dispatch:
+    name: reserve-dispatch (${{ matrix.user.nickname || matrix.user.nickName || matrix.user.name || matrix.user.remark || matrix.user.username || '用户' }})
+    if: ${{ github.event_name == 'repository_dispatch' && (needs.prepare-dispatch.outputs.dispatch_target == 'github' || needs.prepare-dispatch.outputs.dispatch_target == 'both') }}
+    needs: prepare-dispatch
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        user: ${{ fromJson(needs.prepare-dispatch.outputs.users_matrix) }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run reserve script
+        env:
+          CX_USERNAME: ${{ secrets.CX_USERNAME }}
+          CX_PASSWORD: ${{ secrets.CX_PASSWORD }}
+          DISPATCH_PAYLOAD: ${{ toJson(matrix.user) }}
+          TULINGCLOUD_USERNAME: ${{ secrets.TULINGCLOUD_USERNAME }}
+          TULINGCLOUD_PASSWORD: ${{ secrets.TULINGCLOUD_PASSWORD }}
+          TULINGCLOUD_MODEL_ID: ${{ secrets.TULINGCLOUD_MODEL_ID }}
+        run: |
+          python main.py --action --dispatch 2>&1 | tee reserve.log
+
+      - name: Extract key logs
+        if: ${{ always() }}
+        env:
+          USER_NAME: ${{ matrix.user.nickname || matrix.user.nickName || matrix.user.name || matrix.user.remark || matrix.user.username || 'user' }}
+        run: |
+          user_name="${USER_NAME}"
+          out_file="key_logs_${user_name}.txt"
+
+          if [[ -f reserve.log ]]; then
+            grep -E "Start first attempt|login successfully|\[strategic\]|\[burst\]|\[warm\]|submit parameter|submit enc|Get token|Got token|token fetch failed|No submit_enc|captcha|Slider captcha token|Textclick captcha token|保存失败|seat-increment|dispatch|HTTP [0-9]{3}|exception|error|Current time|reserved successfully|success list" reserve.log | tail -n 260 > "$out_file" || true
+          else
+            echo "reserve.log not found" > "$out_file"
+          fi
+
+          echo "===== Key Logs (${user_name}) ====="
+          cat "$out_file"
+
+          {
+            echo "### 用户关键日志 - ${user_name}"
+            echo
+            echo "筛选规则：登录、连接预热、token 获取、验证码、策略发射/结果、提交参数、保存失败、座位递增、dispatch/异常、结束状态"
+            echo
+            echo '```text'
+            cat "$out_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload key logs artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: key-logs-dispatch-${{ matrix.user.nickname || matrix.user.nickName || matrix.user.name || matrix.user.remark || matrix.user.username || 'user' }}
+          path: key_logs_*.txt
+          if-no-files-found: ignore
+
+      - name: Send key logs to Feishu (dispatch)
+        if: ${{ always() }}
+        env:
+          USER_NAME: ${{ matrix.user.nickname || matrix.user.nickName || matrix.user.name || matrix.user.remark || matrix.user.username || 'user' }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_BOT_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+        run: |
+          webhook="${FEISHU_WEBHOOK:-$FEISHU_BOT_WEBHOOK}"
+          if [[ -z "$webhook" ]]; then
+            echo "Feishu webhook not configured, skip."
+            exit 0
+          fi
+
+          log_file="key_logs_${USER_NAME}.txt"
+          if [[ ! -f "$log_file" && -f reserve.log ]]; then
+            grep -E "Start first attempt|login successfully|\[strategic\]|\[burst\]|\[warm\]|submit parameter|submit enc|Get token|Got token|token fetch failed|No submit_enc|captcha|Slider captcha token|Textclick captcha token|保存失败|seat-increment|dispatch|HTTP [0-9]{3}|exception|error|Current time|reserved successfully|success list" reserve.log | tail -n 260 > "$log_file" || true
+          fi
+
+          if [[ ! -f "$log_file" ]]; then
+            msg_body="reserve key log file not found: $log_file"
+          else
+            msg_body="$(tail -n 80 "$log_file")"
+          fi
+
+          text_msg="$(printf '【抢座关键日志】\n用户: %s\n仓库: %s\n运行ID: %s\n运行链接: https://github.com/%s/actions/runs/%s\n\n%s' \
+            "$USER_NAME" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$msg_body")"
+
+          payload="$(printf '%s' "$text_msg" | jq -Rs '{msg_type:"text",content:{text:.}}')"
+          status_code="$(curl -sS -o /tmp/feishu_resp.txt -w '%{http_code}' -X POST "$webhook" -H 'Content-Type: application/json' -d "$payload" || true)"
+          echo "Feishu response code: ${status_code}"
+          cat /tmp/feishu_resp.txt || true
+
+  forward-dispatch:
+    name: forward-dispatch-to-server
+    if: ${{ github.event_name == 'repository_dispatch' && needs.prepare-dispatch.outputs.dispatch_target == 'server_relay' }}
+    needs: prepare-dispatch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Forward dispatch payload to server
+        run: |
+          dispatch_url="$(jq -r '.client_payload.server_url // ""' "$GITHUB_EVENT_PATH")"
+          dispatch_api_key="$(jq -r '.client_payload.server_api_key // ""' "$GITHUB_EVENT_PATH")"
+
+          if [[ -z "$dispatch_url" ]]; then
+            echo "client_payload.server_url is required"
+            exit 1
+          fi
+
+          payload="$(jq -c '.client_payload' "$GITHUB_EVENT_PATH")"
+          if [[ -z "$payload" || "$payload" == "null" ]]; then
+            echo "client_payload missing from repository_dispatch event"
+            exit 1
+          fi
+
+          headers=(-H 'Content-Type: application/json')
+          if [[ -n "$dispatch_api_key" ]]; then
+            headers+=(-H "X-API-Key: $dispatch_api_key")
+          fi
+
+          http_code="$(curl -sS -o /tmp/server_dispatch_resp.txt -w '%{http_code}' \
+            -X POST "$dispatch_url" \
+            "${headers[@]}" \
+            --data "$payload")"
+
+          echo "Server dispatch HTTP status: ${http_code}"
+          echo "===== Server dispatch response ====="
+          cat /tmp/server_dispatch_resp.txt || true
+
+          {
+            echo "### 服务器中转结果"
+            echo
+            echo "- Dispatch URL: ${dispatch_url}"
+            echo "- HTTP Status: ${http_code}"
+            echo
+            echo '```json'
+            cat /tmp/server_dispatch_resp.txt
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! "$http_code" =~ ^2 ]]; then
+            exit 1
+          fi
+
+  reserve-manual:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+
+      - name: Install dependencies
+        if: ${{ github.event.inputs.test_feishu_only != 'true' }}
+        run: |
+          pip install -r requirements.txt
+
+      - name: Send test message to Feishu (manual)
+        if: ${{ github.event.inputs.test_feishu_only == 'true' }}
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_BOT_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+        run: |
+          webhook="${FEISHU_WEBHOOK:-$FEISHU_BOT_WEBHOOK}"
+          if [[ -z "$webhook" ]]; then
+            echo "Feishu webhook not configured, skip."
+            exit 0
+          fi
+
+          text_msg="$(printf '【抢座关键日志】\n飞书连通性测试成功候选\n仓库: %s\n运行ID: %s\n运行链接: https://github.com/%s/actions/runs/%s\n测试模式: test_feishu_only=%s' \
+            "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "${{ github.event.inputs.test_feishu_only || 'false' }}")"
+
+          payload="$(printf '%s' "$text_msg" | jq -Rs '{msg_type:"text",content:{text:.}}')"
+          status_code="$(curl -sS -o /tmp/feishu_resp_test.txt -w '%{http_code}' -X POST "$webhook" -H 'Content-Type: application/json' -d "$payload" || true)"
+          echo "Feishu test response code: ${status_code}"
+          cat /tmp/feishu_resp_test.txt || true
+
+      - name: Run reserve script (manual)
+        if: ${{ github.event.inputs.test_feishu_only != 'true' }}
+        env:
+          CX_USERNAME: ${{ secrets.CX_USERNAME }}
+          CX_PASSWORD: ${{ secrets.CX_PASSWORD }}
+          TULINGCLOUD_USERNAME: ${{ secrets.TULINGCLOUD_USERNAME }}
+          TULINGCLOUD_PASSWORD: ${{ secrets.TULINGCLOUD_PASSWORD }}
+          TULINGCLOUD_MODEL_ID: ${{ secrets.TULINGCLOUD_MODEL_ID }}
+        run: |
+          python main.py --action 2>&1 | tee reserve.log
+
+      - name: Extract key logs (manual)
+        if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}
+        env:
+          USER_NAME: manual
+        run: |
+          user_name="${USER_NAME}"
+          out_file="key_logs_${user_name}.txt"
+
+          if [[ -f reserve.log ]]; then
+            grep -E "Start first attempt|login successfully|\[strategic\]|\[burst\]|\[warm\]|submit parameter|submit enc|Get token|Got token|token fetch failed|No submit_enc|captcha|Slider captcha token|Textclick captcha token|保存失败|seat-increment|dispatch|HTTP [0-9]{3}|exception|error|Current time|reserved successfully|success list" reserve.log | tail -n 260 > "$out_file" || true
+          else
+            echo "reserve.log not found" > "$out_file"
+          fi
+
+          echo "===== Key Logs (${user_name}) ====="
+          cat "$out_file"
+
+          {
+            echo "### 用户关键日志 - ${user_name}"
+            echo
+            echo "筛选规则：登录、连接预热、token 获取、验证码、策略发射/结果、提交参数、保存失败、座位递增、dispatch/异常、结束状态"
+            echo
+            echo '```text'
+            cat "$out_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload key logs artifact (manual)
+        if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: key-logs-manual
+          path: key_logs_*.txt
+          if-no-files-found: ignore
+
+      - name: Send key logs to Feishu (manual)
+        if: ${{ always() && github.event.inputs.test_feishu_only != 'true' }}
+        env:
+          USER_NAME: manual
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_BOT_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+        run: |
+          webhook="${FEISHU_WEBHOOK:-$FEISHU_BOT_WEBHOOK}"
+          if [[ -z "$webhook" ]]; then
+            echo "Feishu webhook not configured, skip."
+            exit 0
+          fi
+
+          log_file="key_logs_${USER_NAME}.txt"
+          if [[ ! -f "$log_file" && -f reserve.log ]]; then
+            grep -E "Start first attempt|login successfully|\[strategic\]|\[burst\]|\[warm\]|submit parameter|submit enc|Get token|Got token|token fetch failed|No submit_enc|captcha|Slider captcha token|Textclick captcha token|保存失败|seat-increment|dispatch|HTTP [0-9]{3}|exception|error|Current time|reserved successfully|success list" reserve.log | tail -n 260 > "$log_file" || true
+          fi
+
+          if [[ ! -f "$log_file" ]]; then
+            msg_body="reserve key log file not found: $log_file"
+          else
+            msg_body="$(tail -n 80 "$log_file")"
+          fi
+
+          text_msg="$(printf '【抢座关键日志】\n用户: %s\n仓库: %s\n运行ID: %s\n运行链接: https://github.com/%s/actions/runs/%s\n\n%s' \
+            "$USER_NAME" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$msg_body")"
+
+          payload="$(printf '%s' "$text_msg" | jq -Rs '{msg_type:"text",content:{text:.}}')"
+          status_code="$(curl -sS -o /tmp/feishu_resp.txt -w '%{http_code}' -X POST "$webhook" -H 'Content-Type: application/json' -d "$payload" || true)"
+          echo "Feishu response code: ${status_code}"
+          cat /tmp/feishu_resp.txt || true
